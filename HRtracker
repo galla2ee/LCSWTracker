@@ -1,0 +1,540 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query,
+  setDoc,
+  getDoc,
+  updateDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  PlusCircle, 
+  History, 
+  LayoutDashboard, 
+  Trash2, 
+  Download, 
+  Clock, 
+  Users, 
+  Calendar,
+  ChevronRight,
+  CheckCircle2,
+  BarChart3, 
+  PieChart,
+  Trophy,
+  UserCheck,
+  Leaf,
+  Settings2,
+  X,
+  RefreshCcw,
+  ClipboardCheck,
+  AlertCircle
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'therapy-tracker-v1';
+
+const COLORS = {
+  sage: '#8DA08E',
+  clay: '#B4846C',
+  sand: '#D9C5B2',
+  linen: '#FAF7F2',
+  bark: '#463F3A',
+  moss: '#5B6B5C'
+};
+
+const VA_GOALS = {
+  CLIENT_CONTACT: 1380,
+  SUPERVISION: 100,
+  TOTAL_EXPERIENCE: 3000
+};
+
+const HOUR_CATEGORIES = {
+  CLIENT: 'Direct Client Contact',
+  SUPERVISION: 'Supervision',
+  ANCILLARY: 'Ancillary/Other'
+};
+
+const SESSION_TYPES = [
+  { label: 'Individual Therapy', cat: HOUR_CATEGORIES.CLIENT },
+  { label: 'Group Therapy', cat: HOUR_CATEGORIES.CLIENT },
+  { label: 'Family/Couples', cat: HOUR_CATEGORIES.CLIENT },
+  { label: 'Intake Assessment', cat: HOUR_CATEGORIES.CLIENT },
+  { label: 'Crisis Intervention', cat: HOUR_CATEGORIES.CLIENT },
+  { label: 'Individual Supervision', cat: HOUR_CATEGORIES.SUPERVISION },
+  { label: 'Group Supervision', cat: HOUR_CATEGORIES.SUPERVISION },
+  { label: 'Documentation/Admin', cat: HOUR_CATEGORIES.ANCILLARY },
+  { label: 'Consultation', cat: HOUR_CATEGORIES.ANCILLARY },
+  { label: 'Training/CEU', cat: HOUR_CATEGORIES.ANCILLARY }
+];
+
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const FREQUENCIES = ['Daily', 'Weekly', 'Bi-weekly', 'Monthly'];
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [recurringTemplates, setRecurringTemplates] = useState([]);
+  const [priorHours, setPriorHours] = useState({ client: 0, supervision: 0, ancillary: 0 });
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
+  
+  const [formData, setFormData] = useState({
+    clientName: '',
+    date: new Date().toISOString().split('T')[0],
+    duration: '60',
+    type: SESSION_TYPES[0].label,
+    notes: ''
+  });
+
+  const [recurringData, setRecurringData] = useState({
+    clientName: '',
+    dayOfWeek: 'Monday',
+    frequency: 'Weekly',
+    duration: '60',
+    type: SESSION_TYPES[0].label
+  });
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) { console.error("Auth error:", err); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const sessionsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'sessions');
+    const unsubSessions = onSnapshot(query(sessionsRef), (snapshot) => {
+      const fetched = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      fetched.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setSessions(fetched);
+      setIsLoading(false);
+    });
+
+    const templatesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'recurring_templates');
+    const unsubTemplates = onSnapshot(query(templatesRef), (snapshot) => {
+      setRecurringTemplates(snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })));
+    });
+
+    const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'prior_hours');
+    getDoc(settingsRef).then(docSnap => {
+      if (docSnap.exists()) setPriorHours(docSnap.data());
+    });
+
+    return () => { unsubSessions(); unsubTemplates(); };
+  }, [user]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+    const selectedType = SESSION_TYPES.find(t => t.label === formData.type);
+    const newSession = {
+      clientName: formData.clientName,
+      date: formData.date,
+      duration: parseFloat(formData.duration),
+      type: formData.type,
+      category: selectedType.cat,
+      notes: formData.notes,
+      status: 'approved',
+      createdAt: new Date().toISOString()
+    };
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'sessions'), newSession);
+    setFormData({ ...formData, clientName: '', notes: '' });
+    setShowSuccess(true);
+    setTimeout(() => setShowSuccess(false), 3000);
+  };
+
+  const handleCreateRecurring = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+    const selectedType = SESSION_TYPES.find(t => t.label === recurringData.type);
+    const template = {
+      ...recurringData,
+      category: selectedType.cat,
+      duration: parseFloat(recurringData.duration)
+    };
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'recurring_templates'), template);
+    setIsRecurringModalOpen(false);
+    setRecurringData({
+      clientName: '',
+      dayOfWeek: 'Monday',
+      frequency: 'Weekly',
+      duration: '60',
+      type: SESSION_TYPES[0].label
+    });
+  };
+
+  const generateFromTemplate = async (template) => {
+    if (!user) return;
+    const newSession = {
+      clientName: template.clientName,
+      date: new Date().toISOString().split('T')[0],
+      duration: template.duration,
+      type: template.type,
+      category: template.category,
+      notes: `Generated from ${template.frequency.toLowerCase()} template`,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    };
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'sessions'), newSession);
+  };
+
+  const approveSession = async (id) => {
+    if (!user) return;
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'sessions', id);
+    await updateDoc(docRef, { status: 'approved' });
+  };
+
+  const deleteSession = async (id) => {
+    if (!user) return;
+    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'sessions', id));
+  };
+
+  const stats = useMemo(() => {
+    const approvedSessions = sessions.filter(s => s.status === 'approved');
+    
+    const getHours = (cat) => approvedSessions
+      .filter(s => s.category === cat)
+      .reduce((acc, s) => acc + s.duration, 0) / 60;
+
+    const totalClient = getHours(HOUR_CATEGORIES.CLIENT) + (parseFloat(priorHours.client) || 0);
+    const totalSupervision = getHours(HOUR_CATEGORIES.SUPERVISION) + (parseFloat(priorHours.supervision) || 0);
+    const totalAncillary = getHours(HOUR_CATEGORIES.ANCILLARY) + (parseFloat(priorHours.ancillary) || 0);
+    const totalExp = totalClient + totalSupervision + totalAncillary;
+
+    const pendingCount = sessions.filter(s => s.status === 'pending').length;
+
+    const typeDist = SESSION_TYPES.map(t => {
+      const hours = approvedSessions.filter(s => s.type === t.label).reduce((acc, s) => acc + s.duration, 0) / 60;
+      return { type: t.label, hours: hours.toFixed(1), cat: t.cat };
+    }).filter(item => parseFloat(item.hours) > 0);
+
+    return { 
+      totalHours: totalExp.toFixed(1),
+      pendingCount,
+      typeDist,
+      progress: {
+        client: { val: totalClient, target: VA_GOALS.CLIENT_CONTACT, pct: Math.min(100, (totalClient / VA_GOALS.CLIENT_CONTACT) * 100).toFixed(1) },
+        supervision: { val: totalSupervision, target: VA_GOALS.SUPERVISION, pct: Math.min(100, (totalSupervision / VA_GOALS.SUPERVISION) * 100).toFixed(1) },
+        total: { val: totalExp, target: VA_GOALS.TOTAL_EXPERIENCE, pct: Math.min(100, (totalExp / VA_GOALS.TOTAL_EXPERIENCE) * 100).toFixed(1) }
+      }
+    };
+  }, [sessions, priorHours]);
+
+  if (isLoading) return <LoadingScreen />;
+
+  return (
+    <div className="min-h-screen bg-[#FAF7F2] text-[#463F3A] font-sans pb-12">
+      <nav className="bg-white border-b border-[#E5E1D8] sticky top-0 z-20">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 flex justify-between items-center h-16">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-[#8DA08E]"><Leaf className="text-white w-5 h-5" /></div>
+            <div>
+              <span className="font-bold text-xl block">TheraTrack</span>
+              <span className="text-[10px] font-bold text-[#B4846C] uppercase tracking-widest">VA LCSW Pathway</span>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <NavButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<LayoutDashboard size={18} />} label="Dashboard" />
+            <NavButton active={activeTab === 'history'} onClick={() => setActiveTab('history')} icon={<History size={18} />} label="History" />
+            <NavButton active={activeTab === 'recurring'} onClick={() => setActiveTab('recurring')} icon={<RefreshCcw size={18} />} label="Recurring" />
+          </div>
+        </div>
+      </nav>
+
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
+        {activeTab === 'dashboard' ? (
+          <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-500">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              <ProgressTile title="Direct Client Contact" stats={stats.progress.client} color={COLORS.sage} icon={<Users size={20} style={{color: COLORS.sage}} />} />
+              <ProgressTile title="Supervision" stats={stats.progress.supervision} color={COLORS.clay} icon={<UserCheck size={20} style={{color: COLORS.clay}} />} />
+              <ProgressTile title="Total Experience" stats={stats.progress.total} color={COLORS.moss} icon={<Trophy size={20} style={{color: COLORS.moss}} />} />
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-3">
+              <ActionButton icon={<Settings2 size={14} />} label="Adjust Prior Balances" onClick={() => setIsModalOpen(true)} />
+              <ActionButton icon={<RefreshCcw size={14} />} label="Manage Schedules" onClick={() => setActiveTab('recurring')} />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+              <div className="lg:col-span-8 space-y-6">
+                {stats.pendingCount > 0 && (
+                  <div className="bg-white p-7 rounded-[2.5rem] border-2 border-dashed border-[#D9C5B2] animate-pulse">
+                    <div className="flex items-center gap-2 mb-6 text-[#B4846C]">
+                      <ClipboardCheck size={20} />
+                      <h3 className="font-bold text-lg">Awaiting Approval ({stats.pendingCount})</h3>
+                    </div>
+                    <div className="space-y-3">
+                      {sessions.filter(s => s.status === 'pending').map(s => (
+                        <PendingItem key={s.id} session={s} onApprove={approveSession} onDelete={deleteSession} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <ChartCard title="Workload" icon={<PieChart size={16} />}>
+                    {stats.typeDist.length > 0 ? (
+                      stats.typeDist.map((item, idx) => (
+                        <div key={idx} className="mb-4">
+                          <div className="flex justify-between text-[11px] mb-1 font-bold"><span>{item.type}</span><span>{item.hours}h</span></div>
+                          <div className="w-full bg-[#FAF7F2] h-1.5 rounded-full"><div className="h-full rounded-full bg-[#8DA08E]" style={{ width: `${Math.min(100, (parseFloat(item.hours) / stats.totalHours) * 100)}%` }} /></div>
+                        </div>
+                      ))
+                    ) : <p className="text-center text-xs text-stone-300 italic py-10">No data logged yet.</p>}
+                  </ChartCard>
+                  
+                  <ChartCard title="Quick Log" icon={<PlusCircle size={16} />}>
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                      <Input label="Client Name" value={formData.clientName} onChange={v => setFormData({...formData, clientName: v})} />
+                      <div className="grid grid-cols-2 gap-3">
+                        <Input label="Date" type="date" value={formData.date} onChange={v => setFormData({...formData, date: v})} />
+                        <Input label="Min" type="number" value={formData.duration} onChange={v => setFormData({...formData, duration: v})} />
+                      </div>
+                      <button type="submit" className="w-full py-3 bg-[#8DA08E] text-white rounded-2xl font-bold shadow-md hover:bg-[#7a8c7b] transition-colors">Add to Logbook</button>
+                      {showSuccess && <p className="text-center text-[#8DA08E] text-[10px] font-bold">✓ Saved successfully</p>}
+                    </form>
+                  </ChartCard>
+                </div>
+              </div>
+
+              <div className="lg:col-span-4 space-y-4">
+                <h3 className="text-[10px] font-black uppercase tracking-widest px-2 text-[#A39171]">Recent Approved</h3>
+                {sessions.filter(s => s.status === 'approved').slice(0, 5).map(s => <SessionItem key={s.id} session={s} onDelete={deleteSession} />)}
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'history' ? (
+          <HistoryView sessions={sessions} onDelete={deleteSession} />
+        ) : (
+          <RecurringView 
+            templates={recurringTemplates} 
+            onGenerate={generateFromTemplate} 
+            onOpenModal={() => setIsRecurringModalOpen(true)}
+            onDelete={async (id) => await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'recurring_templates', id))} 
+          />
+        )}
+      </main>
+
+      <PriorHoursModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} data={priorHours} onSave={async (d) => {
+        const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'prior_hours');
+        await setDoc(settingsRef, d);
+        setPriorHours(d);
+        setIsModalOpen(false);
+      }} />
+
+      <RecurringModal isOpen={isRecurringModalOpen} onClose={() => setIsRecurringModalOpen(false)} data={recurringData} setData={setRecurringData} onSave={handleCreateRecurring} />
+    </div>
+  );
+};
+
+const LoadingScreen = () => (
+  <div className="min-h-screen flex items-center justify-center bg-[#FAF7F2]">
+    <div className="flex flex-col items-center gap-4 animate-pulse">
+      <div className="w-12 h-12 rounded-full border-4 border-[#8DA08E] border-t-transparent animate-spin"></div>
+      <p className="text-[#8DA08E] font-medium italic">Syncing clinical logs...</p>
+    </div>
+  </div>
+);
+
+const NavButton = ({ active, onClick, icon, label }) => (
+  <button onClick={onClick} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all ${active ? 'bg-[#463F3A] text-white shadow-md' : 'text-[#A39171] hover:bg-white'}`}>
+    {icon} <span className="hidden md:inline">{label}</span>
+  </button>
+);
+
+const ProgressTile = ({ title, stats, icon, color }) => (
+  <div className="bg-white p-7 rounded-[2.5rem] shadow-sm border border-[#E5E1D8]">
+    <div className="flex justify-between items-start mb-6">
+      <div className="flex items-center gap-3"><div className="p-2.5 bg-[#FAF7F2] rounded-2xl">{icon}</div><span className="text-[10px] font-black text-[#A39171] uppercase tracking-widest">{title}</span></div>
+      <span className="text-xl font-black">{stats.pct}%</span>
+    </div>
+    <div className="text-3xl font-black mb-5">{stats.val.toFixed(1)} <span className="text-sm font-bold text-[#D9C5B2]">/ {stats.target}h</span></div>
+    <div className="w-full bg-[#FAF7F2] h-2.5 rounded-full overflow-hidden">
+      <div className="h-full transition-all duration-[1500ms]" style={{ width: `${stats.pct}%`, backgroundColor: color }} />
+    </div>
+  </div>
+);
+
+const ActionButton = ({ icon, label, onClick }) => (
+  <button onClick={onClick} className="flex items-center gap-2 px-6 py-3 rounded-full bg-white border border-[#E5E1D8] text-[10px] font-black uppercase tracking-widest text-[#B4846C] hover:bg-[#FAF7F2] transition-colors shadow-sm">
+    {icon} {label}
+  </button>
+);
+
+const ChartCard = ({ title, icon, children }) => (
+  <div className="bg-white p-7 rounded-[2.5rem] border border-[#E5E1D8] h-full">
+    <h3 className="text-[10px] font-black text-[#A39171] uppercase tracking-[0.2em] mb-6 flex items-center gap-2">{icon} {title}</h3>
+    {children}
+  </div>
+);
+
+const Input = ({ label, type = "text", value, onChange, placeholder, step }) => (
+  <div>
+    <label className="block text-[10px] font-black text-[#A39171] uppercase tracking-widest mb-1">{label}</label>
+    <input type={type} step={step} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className="w-full px-4 py-2 bg-[#FAF7F2] border border-[#E5E1D8] rounded-xl outline-none text-sm" />
+  </div>
+);
+
+const PendingItem = ({ session, onApprove, onDelete }) => (
+  <div className="bg-[#FAF7F2] p-4 rounded-2xl border border-[#D9C5B2] flex justify-between items-center group">
+    <div className="flex gap-4 items-center">
+      <div className="bg-amber-100 p-2 rounded-lg text-amber-700"><AlertCircle size={16} /></div>
+      <div>
+        <h4 className="font-bold text-sm">{session.clientName}</h4>
+        <p className="text-[10px] text-stone-500 font-bold uppercase">{session.date} • {session.duration} min</p>
+      </div>
+    </div>
+    <div className="flex gap-2">
+      <button onClick={() => onApprove(session.id)} className="bg-[#8DA08E] text-white p-2 rounded-lg hover:opacity-90 transition-all"><CheckCircle2 size={16} /></button>
+      <button onClick={() => onDelete(session.id)} className="bg-white border border-[#E5E1D8] text-stone-300 p-2 rounded-lg hover:text-red-400 transition-all"><Trash2 size={16} /></button>
+    </div>
+  </div>
+);
+
+const SessionItem = ({ session, onDelete }) => (
+  <div className="bg-white p-4 rounded-2xl border border-[#E5E1D8] flex justify-between items-center group">
+    <div className="flex gap-3 items-center">
+      <div className="w-10 h-10 rounded-xl bg-[#FAF7F2] flex flex-col items-center justify-center text-[9px] font-bold text-[#A39171] border border-[#E5E1D8]">
+        {new Date(session.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
+        <span className="text-stone-700 leading-none">{new Date(session.date + 'T00:00:00').getDate()}</span>
+      </div>
+      <div>
+        <h4 className="font-bold text-sm leading-tight">{session.clientName}</h4>
+        <p className="text-[10px] text-stone-400 uppercase font-black">{session.duration}m</p>
+      </div>
+    </div>
+    <button onClick={() => onDelete(session.id)} className="opacity-0 group-hover:opacity-100 text-stone-200 hover:text-[#B4846C] transition-all"><Trash2 size={16} /></button>
+  </div>
+);
+
+const RecurringView = ({ templates, onGenerate, onDelete, onOpenModal }) => (
+  <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+    <div className="flex justify-between items-center px-4">
+      <div><h2 className="text-2xl font-bold">Recurring Templates</h2><p className="text-sm text-[#A39171]">Automate your weekly clinical schedule</p></div>
+      <button onClick={onOpenModal} className="px-6 py-3 rounded-full bg-[#463F3A] text-white text-[10px] font-black uppercase tracking-widest hover:opacity-90 transition-all shadow-lg flex items-center gap-2"><PlusCircle size={14} /> New Schedule</button>
+    </div>
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+      {templates.map(t => (
+        <div key={t.id} className="bg-white p-6 rounded-[2rem] border border-[#E5E1D8] relative group">
+          <div className="flex justify-between mb-4 items-center">
+            <span className="text-[9px] font-black text-white bg-[#B4846C] px-2 py-0.5 rounded-full uppercase tracking-widest">{t.frequency}</span>
+            <button onClick={() => onDelete(t.id)} className="text-stone-200 hover:text-red-400 transition-colors"><Trash2 size={16} /></button>
+          </div>
+          <p className="text-[10px] font-bold text-[#A39171] uppercase tracking-widest mb-1">{t.dayOfWeek}</p>
+          <h3 className="text-lg font-bold text-[#463F3A] mb-1">{t.clientName}</h3>
+          <p className="text-xs text-[#8DA08E] font-bold uppercase mb-6">{t.type} • {t.duration} min</p>
+          <button onClick={() => onGenerate(t)} className="w-full py-3 rounded-xl border-2 border-[#8DA08E] text-[#8DA08E] font-bold text-[10px] uppercase tracking-widest hover:bg-[#8DA08E] hover:text-white transition-all">Generate Entry</button>
+        </div>
+      ))}
+      {templates.length === 0 && <div className="col-span-full py-20 text-center border-2 border-dashed border-[#E5E1D8] rounded-[3rem] text-stone-300 italic">No schedules defined yet.</div>}
+    </div>
+  </div>
+);
+
+const HistoryView = ({ sessions, onDelete }) => (
+  <div className="bg-white rounded-[2.5rem] border border-[#E5E1D8] overflow-hidden">
+    <div className="p-10 border-b border-[#FAF7F2] bg-[#FAF7F2]/50 flex justify-between items-center">
+      <h2 className="text-2xl font-bold">Clinical Logbook</h2>
+      <div className="px-4 py-2 bg-[#8DA08E] text-white text-[10px] font-black uppercase tracking-widest rounded-full">All Approved Records</div>
+    </div>
+    <div className="overflow-x-auto">
+      <table className="w-full text-left">
+        <thead><tr className="text-[9px] font-black text-[#A39171] uppercase tracking-[0.2em] bg-[#FAF7F2]/30"><th className="px-10 py-5">Date</th><th className="px-10 py-5">Details</th><th className="px-10 py-5">Status</th><th className="px-10 py-5">Hrs</th><th className="px-10 py-5 text-right">Action</th></tr></thead>
+        <tbody className="divide-y divide-[#FAF7F2]">
+          {sessions.map(s => (
+            <tr key={s.id} className="hover:bg-[#FAF7F2]/50">
+              <td className="px-10 py-6 text-xs font-mono">{s.date}</td>
+              <td className="px-10 py-6"><p className="text-sm font-bold">{s.clientName}</p><p className="text-[11px] text-stone-400 italic">{s.type}</p></td>
+              <td className="px-10 py-6">
+                <span className={`text-[9px] font-black uppercase px-2 py-1 rounded-full border ${s.status === 'approved' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>{s.status}</span>
+              </td>
+              <td className="px-10 py-6 text-sm font-black">{(s.duration / 60).toFixed(1)}h</td>
+              <td className="px-10 py-6 text-right"><button onClick={() => onDelete(s.id)} className="text-stone-200 hover:text-[#B4846C] transition-colors"><Trash2 size={16} /></button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+);
+
+const PriorHoursModal = ({ isOpen, onClose, data, onSave }) => {
+  const [local, setLocal] = useState(data);
+  useEffect(() => setLocal(data), [data]);
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/40 backdrop-blur-sm">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl border border-[#E5E1D8]">
+        <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-bold uppercase tracking-widest text-sm">Adjustment</h3><button onClick={onClose}><X size={20}/></button></div>
+        <div className="space-y-4">
+          <Input label="Prior Direct Client (hrs)" type="number" step="0.1" value={local.client} onChange={v => setLocal({...local, client: v})} />
+          <Input label="Prior Supervision (hrs)" type="number" step="0.1" value={local.supervision} onChange={v => setLocal({...local, supervision: v})} />
+          <Input label="Prior Ancillary (hrs)" type="number" step="0.1" value={local.ancillary} onChange={v => setLocal({...local, ancillary: v})} />
+          <button onClick={() => onSave(local)} className="w-full py-4 bg-[#463F3A] text-white font-black uppercase tracking-widest text-[11px] rounded-2xl mt-4 shadow-lg transition-transform active:scale-95">Update Cloud Balances</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const RecurringModal = ({ isOpen, onClose, data, setData, onSave }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/40 backdrop-blur-sm">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] p-8 shadow-2xl border border-[#E5E1D8]">
+        <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-bold uppercase tracking-widest text-sm">Setup Schedule</h3><button onClick={onClose}><X size={20}/></button></div>
+        <form onSubmit={onSave} className="space-y-4">
+          <Input label="Client Name" value={data.clientName} onChange={v => setData({...data, clientName: v})} />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[10px] font-black text-[#A39171] uppercase tracking-widest mb-1">Day</label>
+              <select className="w-full px-4 py-2 bg-[#FAF7F2] border border-[#E5E1D8] rounded-xl outline-none text-sm" value={data.dayOfWeek} onChange={e => setData({...data, dayOfWeek: e.target.value})}>{DAYS.map(d => <option key={d} value={d}>{d}</option>)}</select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-black text-[#A39171] uppercase tracking-widest mb-1">Frequency</label>
+              <select className="w-full px-4 py-2 bg-[#FAF7F2] border border-[#E5E1D8] rounded-xl outline-none text-sm" value={data.frequency} onChange={e => setData({...data, frequency: e.target.value})}>{FREQUENCIES.map(f => <option key={f} value={f}>{f}</option>)}</select>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="Duration (min)" type="number" value={data.duration} onChange={v => setData({...data, duration: v})} />
+            <div>
+              <label className="block text-[10px] font-black text-[#A39171] uppercase tracking-widest mb-1">Type</label>
+              <select className="w-full px-4 py-2 bg-[#FAF7F2] border border-[#E5E1D8] rounded-xl outline-none text-sm" value={data.type} onChange={e => setData({...data, type: e.target.value})}>{SESSION_TYPES.map(t => <option key={t.label} value={t.label}>{t.label}</option>)}</select>
+            </div>
+          </div>
+          <button type="submit" className="w-full py-4 bg-[#8DA08E] text-white font-black uppercase tracking-widest text-[11px] rounded-2xl mt-4 shadow-lg transition-transform active:scale-95">Save Schedule Template</button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default App;
